@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FHIR JSON Visualizer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header>
+        <h1>FHIR JSON Visualizer</h1>
+        <p class="subtitle">Load, visualize, edit, and share FHIR bundles</p>
+    </header>
+
+    <main>
+        <!-- Input Section -->
+        <section class="input-section">
+            <div class="input-group">
+                <label for="jsonInput">Paste JSON:</label>
+                <textarea id="jsonInput" placeholder="Paste your FHIR bundle or JSON here..."></textarea>
+            </div>
+
+            <div class="input-group">
+                <label for="urlInput">Or load from URL:</label>
+                <div class="url-input-wrapper">
+                    <input type="text" id="urlInput" placeholder="https://example.com/fhir-bundle.json">
+                    <button id="loadUrlBtn" class="btn">Load from URL</button>
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button id="parseBtn" class="btn btn-primary">Visualize</button>
+                <button id="shareBtn" class="btn btn-secondary">Share Link</button>
+                <button id="clearBtn" class="btn btn-secondary">Clear</button>
+            </div>
+
+            <div id="errorMsg" class="error-message hidden"></div>
+            <div id="successMsg" class="success-message hidden"></div>
+        </section>
+
+        <!-- Visualization Section -->
+        <section class="visualization-section hidden" id="vizSection">
+            <div class="viz-controls">
+                <div class="view-toggles">
+                    <button id="showCodeBtn" class="toggle-btn active">Code View</button>
+                    <button id="showTreeBtn" class="toggle-btn active">Tree View</button>
+                </div>
+                <div class="edit-mode-toggle">
+                    <label>
+                        <input type="checkbox" id="editModeToggle">
+                        Edit Mode
+                    </label>
+                </div>
+            </div>
+
+            <div class="dual-pane">
+                <!-- Code Editor Pane -->
+                <div class="pane code-pane" id="codePane">
+                    <h2>Code View</h2>
+                    <div class="code-editor-wrapper">
+                        <pre id="codeEditor" contenteditable="false"><code id="jsonCode"></code></pre>
+                    </div>
+                    <div class="pane-actions">
+                        <button id="formatCodeBtn" class="btn-small">Format</button>
+                        <button id="copyCodeBtn" class="btn-small">Copy</button>
+                    </div>
+                </div>
+
+                <!-- Tree View Pane -->
+                <div class="pane tree-pane" id="treePane">
+                    <h2>Tree View</h2>
+                    <div class="tree-container" id="treeContainer"></div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <p>FHIR JSON Visualizer | Built with HTML, CSS, and JavaScript</p>
+    </footer>
+
+    <!-- LZ-String for URL compression -->
+    <script src="https://cdn.jsdelivr.net/npm/lz-string@1.5.0/libs/lz-string.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
