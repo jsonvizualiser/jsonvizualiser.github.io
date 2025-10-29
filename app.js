@@ -23,6 +23,25 @@ const FHIR_DICT = {
     '"Condition"': '\x3B', '"Observation"': '\x3C', '"DiagnosticReport"': '\x3D',
     '"FamilyMemberHistory"': '\x3E', '"ServiceRequest"': '\x3F',
 
+    // Common FHIR enum/status values (\x40-\x6F)
+    '"final"': '\x40', '"active"': '\x41', '"completed"': '\x42', '"confirmed"': '\x43',
+    '"provisional"': '\x44', '"male"': '\x45', '"female"': '\x46', '"Present"': '\x47',
+    '"Abnormal"': '\x48', '"Imaging"': '\x49', '"Exam"': '\x4A', '"Radiology"': '\x4B',
+    '"imaging"': '\x4C', '"exam"': '\x4D', '"order"': '\x4E', '"collection"': '\x4F',
+    '"Active"': '\x50', '"Confirmed"': '\x51', '"Provisional"': '\x52', '"years"': '\x53',
+    '"Encounter Diagnosis"': '\x54', '"encounter-diagnosis"': '\x55', '"Brother"': '\x56',
+    '"Suspected"': '\x57', '"Indeterminate"': '\x58', '"RAD"': '\x59', '"BRO"': '\x5A',
+    '"A"': '\x5B', '"IND"': '\x5C',
+
+    // Common medical terms (\x70-\x9F)
+    '"Pneumonia"': '\x70', '"Bronchiectasis"': '\x71', '"Chest X-ray"': '\x72',
+    '"Cough"': '\x73', '"John Smith"': '\x74', '"Mycoplasma pneumonia"': '\x75',
+    '"Mycoplasma pneumoniae pneumonia"': '\x76', '"Community acquired pneumonia"': '\x77',
+    '"Hilar lymphadenopathy"': '\x78', '"Opacity of lung field"': '\x79',
+    '"Parenchymal opacity"': '\x7A', '"Hilar fullness"': '\x7B',
+    '"Left upper lobe of lung"': '\x7C', '"Left hilum of lung"': '\x7D',
+    '"Michael Smith (Brother)"': '\x7E',
+
     // Common URLs (using \xF0-\xFF range)
     '"http://snomed.info/sct"': '\xF1',
     '"http://terminology.hl7.org/CodeSystem/': '\xF2',
@@ -30,13 +49,106 @@ const FHIR_DICT = {
     '"http://unitsofmeasure.org"': '\xF4',
     '"urn:uuid:': '\xF5',
     '"http://loinc.org"': '\xF6',
-    '"http://hospital.example.org/': '\xF7'
+    '"http://hospital.example.org/': '\xF7',
+    '"http://terminology.hl7.org/CodeSystem/condition-clinical"': '\xF8',
+    '"http://terminology.hl7.org/CodeSystem/condition-ver-status"': '\xF9',
+    '"http://terminology.hl7.org/CodeSystem/condition-category"': '\xFA',
+    '"http://terminology.hl7.org/CodeSystem/observation-category"': '\xFB',
+    '"http://terminology.hl7.org/CodeSystem/v2-0074"': '\xFC',
+    '"http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation"': '\xFD',
+    '"http://terminology.hl7.org/CodeSystem/v3-RoleCode"': '\xFE'
 };
 
 // Create reverse dictionary for detokenization
 const FHIR_DICT_REVERSE = {};
 for (const [key, value] of Object.entries(FHIR_DICT)) {
     FHIR_DICT_REVERSE[value] = key;
+}
+
+// UUID/Reference compression
+const REF_MARKER = '\uE000'; // Private use area character as reference marker
+
+// Build reference table by scanning object for urn:uuid: strings
+function buildReferenceTable(obj, refTable = [], refMap = new Map()) {
+    if (obj === null || typeof obj !== 'object') {
+        // Check if it's a string starting with urn:uuid:
+        if (typeof obj === 'string' && obj.startsWith('urn:uuid:')) {
+            if (!refMap.has(obj)) {
+                const index = refTable.length;
+                refTable.push(obj);
+                refMap.set(obj, index);
+            }
+        }
+        return { refTable, refMap };
+    }
+
+    if (Array.isArray(obj)) {
+        obj.forEach(item => buildReferenceTable(item, refTable, refMap));
+        return { refTable, refMap };
+    }
+
+    for (const value of Object.values(obj)) {
+        buildReferenceTable(value, refTable, refMap);
+    }
+
+    return { refTable, refMap };
+}
+
+// Compress references: replace urn:uuid: strings with marker + index
+function compressReferences(obj, refMap) {
+    if (obj === null) {
+        return obj;
+    }
+
+    if (typeof obj === 'string' && obj.startsWith('urn:uuid:')) {
+        const index = refMap.get(obj);
+        if (index !== undefined) {
+            // Return marker + index byte (supports up to 255 references)
+            return REF_MARKER + String.fromCharCode(index);
+        }
+    }
+
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => compressReferences(item, refMap));
+    }
+
+    const compressed = {};
+    for (const [key, value] of Object.entries(obj)) {
+        compressed[key] = compressReferences(value, refMap);
+    }
+
+    return compressed;
+}
+
+// Decompress references: restore urn:uuid: strings from table
+function decompressReferences(obj, refTable) {
+    if (obj === null) {
+        return obj;
+    }
+
+    if (typeof obj === 'string' && obj.startsWith(REF_MARKER)) {
+        const index = obj.charCodeAt(1);
+        return refTable[index] || obj;
+    }
+
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => decompressReferences(item, refTable));
+    }
+
+    const decompressed = {};
+    for (const [key, value] of Object.entries(obj)) {
+        decompressed[key] = decompressReferences(value, refTable);
+    }
+
+    return decompressed;
 }
 
 // Tokenize object (recursively replace common FHIR field names and URLs with tokens)
@@ -182,11 +294,19 @@ function loadFromURL() {
                 // Step 3: Decompress with fflate
                 const decompressedBytes = fflate.unzlibSync(compressed);
 
-                // Step 4: Decode CBOR to object
-                const cborDecoded = CBOR.decode(decompressedBytes.buffer);
+                // Step 4: Decode CBOR to payload
+                const payload = CBOR.decode(decompressedBytes.buffer);
 
-                // Step 5: Detokenize object (restore original field names)
-                jsonData = detokenizeFHIR(cborDecoded);
+                // Step 5: Check if it's the new format with refs and data
+                let decoded;
+                if (payload && typeof payload === 'object' && 'refs' in payload && 'data' in payload) {
+                    // New format with UUID reference compression
+                    decoded = detokenizeFHIR(payload.data);
+                    jsonData = decompressReferences(decoded, payload.refs);
+                } else {
+                    // Old format without UUID compression
+                    jsonData = detokenizeFHIR(payload);
+                }
             } catch (e) {
                 // CBOR format failed, try older formats
                 console.log('CBOR decode failed, trying fallback formats');
@@ -273,16 +393,23 @@ function handleShare() {
             currentJSON = JSON.parse(editedText);
         }
 
-        // Step 1: Tokenize FHIR object (replace common field names with short tokens)
-        const tokenizedObj = tokenizeFHIR(currentJSON);
+        // Step 1: Build reference table for UUID compression
+        const { refTable, refMap } = buildReferenceTable(currentJSON);
 
-        // Step 2: Encode tokenized object to CBOR binary format
-        const cborData = CBOR.encode(tokenizedObj);
+        // Step 2: Compress UUIDs (replace with marker + index)
+        const refCompressed = compressReferences(currentJSON, refMap);
 
-        // Step 3: Compress with fflate (gzip/zlib)
+        // Step 3: Tokenize FHIR object (replace common field names/values with short tokens)
+        const tokenizedObj = tokenizeFHIR(refCompressed);
+
+        // Step 4: Encode [refTable, tokenizedObj] to CBOR binary format
+        const payload = { refs: refTable, data: tokenizedObj };
+        const cborData = CBOR.encode(payload);
+
+        // Step 5: Compress with fflate (gzip/zlib)
         const compressed = fflate.zlibSync(new Uint8Array(cborData), { level: 9 });
 
-        // Step 4: Convert to base64url (URL-safe)
+        // Step 6: Convert to base64url (URL-safe)
         const base64 = btoa(String.fromCharCode.apply(null, compressed));
         const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 
