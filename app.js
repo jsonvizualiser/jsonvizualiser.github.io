@@ -56,7 +56,20 @@ function loadFromURL() {
     const hash = window.location.hash.substring(1);
     if (hash) {
         try {
-            const decompressed = LZString.decompressFromEncodedURIComponent(hash);
+            let decompressed = null;
+
+            // Try UTF-16 compression first (new format for smaller URLs)
+            try {
+                decompressed = LZString.decompressFromUTF16(decodeURIComponent(hash));
+            } catch (e) {
+                // UTF-16 failed, might be old format
+            }
+
+            // Fallback to old format for backward compatibility
+            if (!decompressed) {
+                decompressed = LZString.decompressFromEncodedURIComponent(hash);
+            }
+
             if (decompressed) {
                 const jsonData = JSON.parse(decompressed);
                 currentJSON = jsonData;
@@ -105,7 +118,7 @@ function handleShare() {
         }
 
         const jsonString = JSON.stringify(currentJSON);
-        const compressed = LZString.compressToEncodedURIComponent(jsonString);
+        const compressed = encodeURIComponent(LZString.compressToUTF16(jsonString));
         const shareURL = window.location.origin + window.location.pathname + '#' + compressed;
 
         // Copy to clipboard
