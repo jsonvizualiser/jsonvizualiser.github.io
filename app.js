@@ -153,6 +153,50 @@ function base85Decode(str) {
     return new Uint8Array(bytes);
 }
 
+// Data minification - remove redundant fields for space savings
+function minifyFHIRData(obj) {
+    if (obj === null || typeof obj !== 'object') {
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        // Remove empty arrays
+        const filtered = obj.map(item => minifyFHIRData(item)).filter(item => {
+            if (Array.isArray(item)) return item.length > 0;
+            if (typeof item === 'object' && item !== null) return Object.keys(item).length > 0;
+            return true;
+        });
+        return filtered.length > 0 ? filtered : undefined;
+    }
+
+    const minified = {};
+    for (const [key, value] of Object.entries(obj)) {
+        // Skip empty/null values
+        if (value === null || value === undefined || value === '') {
+            continue;
+        }
+
+        // Recursively minify nested objects
+        const minValue = minifyFHIRData(value);
+
+        // Only add if not empty
+        if (minValue !== undefined) {
+            if (Array.isArray(minValue) && minValue.length === 0) continue;
+            if (typeof minValue === 'object' && minValue !== null && Object.keys(minValue).length === 0) continue;
+            minified[key] = minValue;
+        }
+    }
+
+    return Object.keys(minified).length > 0 ? minified : undefined;
+}
+
+// Restore minified data (add back structure if needed)
+function unminifyFHIRData(obj) {
+    // For now, just return as-is since we're not changing structure
+    // In future, could restore optional fields with defaults
+    return obj;
+}
+
 // UUID/Reference compression
 const REF_MARKER = '\uE000'; // Private use area character as reference marker
 
@@ -385,7 +429,8 @@ function loadFromURL() {
                 if (payload && typeof payload === 'object' && 'refs' in payload && 'data' in payload) {
                     // New format with UUID reference compression
                     decoded = detokenizeFHIR(payload.data);
-                    jsonData = decompressReferences(decoded, payload.refs);
+                    const withRefs = decompressReferences(decoded, payload.refs);
+                    jsonData = unminifyFHIRData(withRefs);
                 } else {
                     // Old format without UUID compression
                     jsonData = detokenizeFHIR(payload);
@@ -417,7 +462,8 @@ function loadFromURL() {
                     if (payload && typeof payload === 'object' && 'refs' in payload && 'data' in payload) {
                         // New format with UUID reference compression
                         decoded = detokenizeFHIR(payload.data);
-                        jsonData = decompressReferences(decoded, payload.refs);
+                        const withRefs = decompressReferences(decoded, payload.refs);
+                        jsonData = unminifyFHIRData(withRefs);
                     } else {
                         // Old format without UUID compression
                         jsonData = detokenizeFHIR(payload);
@@ -509,11 +555,14 @@ function handleShare() {
             currentJSON = JSON.parse(editedText);
         }
 
+        // Step 0: Minify data (remove empty/null values)
+        const minified = minifyFHIRData(currentJSON);
+
         // Step 1: Build reference table for UUID compression
-        const { refTable, refMap } = buildReferenceTable(currentJSON);
+        const { refTable, refMap } = buildReferenceTable(minified);
 
         // Step 2: Compress UUIDs (replace with marker + index)
-        const refCompressed = compressReferences(currentJSON, refMap);
+        const refCompressed = compressReferences(minified, refMap);
 
         // Step 3: Tokenize FHIR object (replace common field names/values with short tokens)
         const tokenizedObj = tokenizeFHIR(refCompressed);
