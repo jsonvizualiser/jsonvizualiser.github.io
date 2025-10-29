@@ -39,26 +39,74 @@ for (const [key, value] of Object.entries(FHIR_DICT)) {
     FHIR_DICT_REVERSE[value] = key;
 }
 
-// Tokenize JSON string (replace common FHIR fields with tokens)
-function tokenizeFHIR(jsonString) {
-    let tokenized = jsonString;
+// Tokenize object (recursively replace common FHIR field names and URLs with tokens)
+function tokenizeFHIR(obj) {
+    if (obj === null) {
+        return obj;
+    }
 
-    // Replace each dictionary entry
-    for (const [original, token] of Object.entries(FHIR_DICT)) {
-        // Use global replacement
-        tokenized = tokenized.split(original).join(token);
+    // Tokenize string values (for URLs and common values)
+    if (typeof obj === 'string') {
+        const quotedValue = '"' + obj + '"';
+        const token = FHIR_DICT[quotedValue];
+        return token ? token : obj;
+    }
+
+    // Non-object primitives return as-is
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => tokenizeFHIR(item));
+    }
+
+    const tokenized = {};
+    for (const [key, value] of Object.entries(obj)) {
+        // Check if this key should be tokenized
+        const quotedKey = '"' + key + '"';
+        const tokenKey = FHIR_DICT[quotedKey] || key;
+
+        // Recursively tokenize the value
+        tokenized[tokenKey] = tokenizeFHIR(value);
     }
 
     return tokenized;
 }
 
-// Detokenize (restore original FHIR fields)
-function detokenizeFHIR(tokenizedString) {
-    let restored = tokenizedString;
+// Detokenize object (restore original FHIR field names and URLs)
+function detokenizeFHIR(obj) {
+    if (obj === null) {
+        return obj;
+    }
 
-    // Replace each token back to original
-    for (const [token, original] of Object.entries(FHIR_DICT_REVERSE)) {
-        restored = restored.split(token).join(original);
+    // Detokenize string values (for URLs and common values)
+    if (typeof obj === 'string') {
+        const original = FHIR_DICT_REVERSE[obj];
+        if (original) {
+            // Remove quotes from the original value
+            return original.slice(1, -1);
+        }
+        return obj;
+    }
+
+    // Non-object primitives return as-is
+    if (typeof obj !== 'object') {
+        return obj;
+    }
+
+    if (Array.isArray(obj)) {
+        return obj.map(item => detokenizeFHIR(item));
+    }
+
+    const restored = {};
+    for (const [key, value] of Object.entries(obj)) {
+        // Check if this key is a token that needs to be restored
+        const originalKey = FHIR_DICT_REVERSE[key];
+        const restoredKey = originalKey ? originalKey.slice(1, -1) : key; // Remove quotes
+
+        // Recursively detokenize the value
+        restored[restoredKey] = detokenizeFHIR(value);
     }
 
     return restored;
@@ -134,15 +182,11 @@ function loadFromURL() {
                 // Step 3: Decompress with fflate
                 const decompressedBytes = fflate.unzlibSync(compressed);
 
-                // Step 4: Decode CBOR to JSON object
+                // Step 4: Decode CBOR to object
                 const cborDecoded = CBOR.decode(decompressedBytes.buffer);
 
-                // Step 5: Convert to JSON string and detokenize
-                const tokenizedJSON = JSON.stringify(cborDecoded);
-                const detokenized = detokenizeFHIR(tokenizedJSON);
-
-                // Step 6: Parse final JSON
-                jsonData = JSON.parse(detokenized);
+                // Step 5: Detokenize object (restore original field names)
+                jsonData = detokenizeFHIR(cborDecoded);
             } catch (e) {
                 // CBOR format failed, try older formats
                 console.log('CBOR decode failed, trying fallback formats');
@@ -229,14 +273,11 @@ function handleShare() {
             currentJSON = JSON.parse(editedText);
         }
 
-        const jsonString = JSON.stringify(currentJSON);
+        // Step 1: Tokenize FHIR object (replace common field names with short tokens)
+        const tokenizedObj = tokenizeFHIR(currentJSON);
 
-        // Step 1: Tokenize FHIR fields (replace common strings with short tokens)
-        const tokenized = tokenizeFHIR(jsonString);
-
-        // Step 2: Parse tokenized JSON and encode to CBOR binary format
-        const tokenizedJSON = JSON.parse(tokenized);
-        const cborData = CBOR.encode(tokenizedJSON);
+        // Step 2: Encode tokenized object to CBOR binary format
+        const cborData = CBOR.encode(tokenizedObj);
 
         // Step 3: Compress with fflate (gzip/zlib)
         const compressed = fflate.zlibSync(new Uint8Array(cborData), { level: 9 });
