@@ -58,14 +58,30 @@ function loadFromURL() {
         try {
             let decompressed = null;
 
-            // Try UTF-16 compression first (new format for smaller URLs)
+            // Try fflate + base64url first (newest format - smallest URLs)
             try {
-                decompressed = LZString.decompressFromUTF16(decodeURIComponent(hash));
+                // Convert base64url back to base64
+                const base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
+                // Add padding if necessary
+                const padded = base64 + '==='.slice((base64.length + 3) % 4);
+                // Decode base64 to Uint8Array
+                const compressed = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+                // Decompress with fflate
+                decompressed = fflate.strFromU8(fflate.unzlibSync(compressed));
             } catch (e) {
-                // UTF-16 failed, might be old format
+                // fflate failed, try UTF-16 format
             }
 
-            // Fallback to old format for backward compatibility
+            // Fallback to UTF-16 format (middle format)
+            if (!decompressed) {
+                try {
+                    decompressed = LZString.decompressFromUTF16(decodeURIComponent(hash));
+                } catch (e) {
+                    // UTF-16 failed too
+                }
+            }
+
+            // Fallback to old EncodedURIComponent format (oldest format)
             if (!decompressed) {
                 decompressed = LZString.decompressFromEncodedURIComponent(hash);
             }
@@ -118,8 +134,15 @@ function handleShare() {
         }
 
         const jsonString = JSON.stringify(currentJSON);
-        const compressed = encodeURIComponent(LZString.compressToUTF16(jsonString));
-        const shareURL = window.location.origin + window.location.pathname + '#' + compressed;
+
+        // Compress with fflate (gzip/zlib)
+        const compressed = fflate.zlibSync(fflate.strToU8(jsonString), { level: 9 });
+
+        // Convert to base64url (URL-safe)
+        const base64 = btoa(String.fromCharCode.apply(null, compressed));
+        const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+
+        const shareURL = window.location.origin + window.location.pathname + '#' + urlSafe;
 
         // Copy to clipboard
         navigator.clipboard.writeText(shareURL).then(() => {
