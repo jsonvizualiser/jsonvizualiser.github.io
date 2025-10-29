@@ -65,6 +65,94 @@ for (const [key, value] of Object.entries(FHIR_DICT)) {
     FHIR_DICT_REVERSE[value] = key;
 }
 
+// Base85 encoding for better URL compression (25% more efficient than base64)
+// Using URL-safe character set (85 chars total)
+const BASE85_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~!*()$,;=@[]';
+
+function base85Encode(bytes) {
+    const result = [];
+    let value = 0;
+    let count = 0;
+
+    for (let i = 0; i < bytes.length; i++) {
+        value = value * 256 + bytes[i];
+        count++;
+
+        if (count === 4) {
+            // Encode 4 bytes into 5 base85 characters
+            const encoded = [];
+            for (let j = 0; j < 5; j++) {
+                encoded.unshift(BASE85_CHARS[value % 85]);
+                value = Math.floor(value / 85);
+            }
+            result.push(...encoded);
+            value = 0;
+            count = 0;
+        }
+    }
+
+    // Handle remaining bytes
+    if (count > 0) {
+        // Pad with zeros
+        for (let j = count; j < 4; j++) {
+            value = value * 256;
+        }
+
+        const encoded = [];
+        for (let j = 0; j < count + 1; j++) {
+            encoded.unshift(BASE85_CHARS[value % 85]);
+            value = Math.floor(value / 85);
+        }
+        result.push(...encoded);
+    }
+
+    return result.join('');
+}
+
+function base85Decode(str) {
+    const bytes = [];
+    let value = 0;
+    let count = 0;
+
+    for (let i = 0; i < str.length; i++) {
+        const char = str[i];
+        const charValue = BASE85_CHARS.indexOf(char);
+
+        if (charValue === -1) {
+            throw new Error('Invalid Base85 character: ' + char);
+        }
+
+        value = value * 85 + charValue;
+        count++;
+
+        if (count === 5) {
+            // Decode 5 base85 characters into 4 bytes
+            for (let j = 3; j >= 0; j--) {
+                bytes.push((value >> (j * 8)) & 0xFF);
+            }
+            value = 0;
+            count = 0;
+        }
+    }
+
+    // Handle remaining characters
+    if (count > 0) {
+        // Calculate how many bytes we should get
+        const numBytes = count - 1;
+
+        // Add implicit zeros
+        for (let j = count; j < 5; j++) {
+            value = value * 85;
+        }
+
+        for (let j = numBytes - 1; j >= 0; j--) {
+            bytes.push((value >> (j * 8)) & 0xFF);
+        }
+    }
+
+    return new Uint8Array(bytes);
+}
+
 // UUID/Reference compression
 const REF_MARKER = '\uE000'; // Private use area character as reference marker
 
@@ -281,23 +369,18 @@ function loadFromURL() {
             let jsonData = null;
             let decompressed = null;
 
-            // Try CBOR + tokenization format first (newest - smallest URLs)
+            // Try Base85 + CBOR format first (newest - smallest URLs)
             try {
-                // Step 1: Convert base64url back to base64
-                const base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
-                // Add padding if necessary
-                const padded = base64 + '==='.slice((base64.length + 3) % 4);
+                // Step 1: Decode Base85 to bytes
+                const compressed = base85Decode(hash);
 
-                // Step 2: Decode base64 to Uint8Array
-                const compressed = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
-
-                // Step 3: Decompress with fflate
+                // Step 2: Decompress with fflate
                 const decompressedBytes = fflate.unzlibSync(compressed);
 
-                // Step 4: Decode CBOR to payload
+                // Step 3: Decode CBOR to payload
                 const payload = CBOR.decode(decompressedBytes.buffer);
 
-                // Step 5: Check if it's the new format with refs and data
+                // Step 4: Check if it's the new format with refs and data
                 let decoded;
                 if (payload && typeof payload === 'object' && 'refs' in payload && 'data' in payload) {
                     // New format with UUID reference compression
@@ -308,8 +391,41 @@ function loadFromURL() {
                     jsonData = detokenizeFHIR(payload);
                 }
             } catch (e) {
-                // CBOR format failed, try older formats
-                console.log('CBOR decode failed, trying fallback formats');
+                // Base85 failed, try base64url format (older URLs)
+                console.log('Base85 decode failed, trying base64url format');
+            }
+
+            // Fallback to base64url + CBOR format
+            if (!jsonData) {
+                try {
+                    // Step 1: Convert base64url back to base64
+                    const base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
+                    // Add padding if necessary
+                    const padded = base64 + '==='.slice((base64.length + 3) % 4);
+
+                    // Step 2: Decode base64 to Uint8Array
+                    const compressed = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+
+                    // Step 3: Decompress with fflate
+                    const decompressedBytes = fflate.unzlibSync(compressed);
+
+                    // Step 4: Decode CBOR to payload
+                    const payload = CBOR.decode(decompressedBytes.buffer);
+
+                    // Step 5: Check if it's the new format with refs and data
+                    let decoded;
+                    if (payload && typeof payload === 'object' && 'refs' in payload && 'data' in payload) {
+                        // New format with UUID reference compression
+                        decoded = detokenizeFHIR(payload.data);
+                        jsonData = decompressReferences(decoded, payload.refs);
+                    } else {
+                        // Old format without UUID compression
+                        jsonData = detokenizeFHIR(payload);
+                    }
+                } catch (e) {
+                    // base64url + CBOR format failed too
+                    console.log('base64url + CBOR decode failed, trying older formats');
+                }
             }
 
             // Fallback to plain fflate format (without CBOR/tokenization)
@@ -409,11 +525,10 @@ function handleShare() {
         // Step 5: Compress with fflate (gzip/zlib)
         const compressed = fflate.zlibSync(new Uint8Array(cborData), { level: 9 });
 
-        // Step 6: Convert to base64url (URL-safe)
-        const base64 = btoa(String.fromCharCode.apply(null, compressed));
-        const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        // Step 6: Encode with Base85 (more efficient than base64)
+        const base85Encoded = base85Encode(compressed);
 
-        const shareURL = window.location.origin + window.location.pathname + '#' + urlSafe;
+        const shareURL = window.location.origin + window.location.pathname + '#' + base85Encoded;
 
         // Copy to clipboard
         navigator.clipboard.writeText(shareURL).then(() => {
