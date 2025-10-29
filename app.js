@@ -2,6 +2,68 @@
 let currentJSON = null;
 let isEditMode = false;
 
+// FHIR Dictionary for tokenization (most common fields and URLs)
+const FHIR_DICT = {
+    // Top frequency fields (1 byte tokens \x01-\x3F)
+    '"resourceType"': '\x01', '"id"': '\x02', '"system"': '\x03', '"code"': '\x04',
+    '"coding"': '\x05', '"display"': '\x06', '"reference"': '\x07', '"subject"': '\x08',
+    '"status"': '\x09', '"text"': '\x0A', '"fullUrl"': '\x0B', '"resource"': '\x0C',
+    '"category"': '\x0D', '"value"': '\x0E', '"url"': '\x0F', '"extension"': '\x10',
+    '"given"': '\x11', '"family"': '\x12', '"identifier"': '\x13', '"name"': '\x14',
+    '"gender"': '\x15', '"birthDate"': '\x16', '"patient"': '\x17', '"entry"': '\x18',
+    '"type"': '\x19', '"timestamp"': '\x1A', '"onsetDateTime"': '\x1B', '"recordedDate"': '\x1C',
+    '"effectiveDateTime"': '\x1D', '"valueString"': '\x1E', '"valueCodeableConcept"': '\x1F',
+    '"bodySite"': '\x20', '"clinicalStatus"': '\x21', '"verificationStatus"': '\x22',
+    '"conclusion"': '\x23', '"conclusionCode"': '\x24', '"note"': '\x25', '"interpretation"': '\x26',
+    '"condition"': '\x27', '"intent"': '\x28', '"occurrenceTiming"': '\x29', '"reasonReference"': '\x2A',
+    '"evidence"': '\x2B', '"detail"': '\x2C', '"relationship"': '\x2D', '"date"': '\x2E',
+    '"valueAge"': '\x2F', '"unit"': '\x30', '"issued"': '\x31', '"result"': '\x32',
+    '"onsetAge"': '\x33', '"repeat"': '\x34', '"boundsPeriod"': '\x35', '"authoredOn"': '\x36',
+    '"start"': '\x37', '"end"': '\x38', '"Bundle"': '\x39', '"Patient"': '\x3A',
+    '"Condition"': '\x3B', '"Observation"': '\x3C', '"DiagnosticReport"': '\x3D',
+    '"FamilyMemberHistory"': '\x3E', '"ServiceRequest"': '\x3F',
+
+    // Common URLs (using \xF0-\xFF range)
+    '"http://snomed.info/sct"': '\xF1',
+    '"http://terminology.hl7.org/CodeSystem/': '\xF2',
+    '"http://hl7.org/fhir/': '\xF3',
+    '"http://unitsofmeasure.org"': '\xF4',
+    '"urn:uuid:': '\xF5',
+    '"http://loinc.org"': '\xF6',
+    '"http://hospital.example.org/': '\xF7'
+};
+
+// Create reverse dictionary for detokenization
+const FHIR_DICT_REVERSE = {};
+for (const [key, value] of Object.entries(FHIR_DICT)) {
+    FHIR_DICT_REVERSE[value] = key;
+}
+
+// Tokenize JSON string (replace common FHIR fields with tokens)
+function tokenizeFHIR(jsonString) {
+    let tokenized = jsonString;
+
+    // Replace each dictionary entry
+    for (const [original, token] of Object.entries(FHIR_DICT)) {
+        // Use global replacement
+        tokenized = tokenized.split(original).join(token);
+    }
+
+    return tokenized;
+}
+
+// Detokenize (restore original FHIR fields)
+function detokenizeFHIR(tokenizedString) {
+    let restored = tokenizedString;
+
+    // Replace each token back to original
+    for (const [token, original] of Object.entries(FHIR_DICT_REVERSE)) {
+        restored = restored.split(token).join(original);
+    }
+
+    return restored;
+}
+
 // DOM Elements
 const elements = {
     jsonInput: document.getElementById('jsonInput'),
@@ -56,42 +118,76 @@ function loadFromURL() {
     const hash = window.location.hash.substring(1);
     if (hash) {
         try {
+            let jsonData = null;
             let decompressed = null;
 
-            // Try fflate + base64url first (newest format - smallest URLs)
+            // Try CBOR + tokenization format first (newest - smallest URLs)
             try {
-                // Convert base64url back to base64
+                // Step 1: Convert base64url back to base64
                 const base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
                 // Add padding if necessary
                 const padded = base64 + '==='.slice((base64.length + 3) % 4);
-                // Decode base64 to Uint8Array
+
+                // Step 2: Decode base64 to Uint8Array
                 const compressed = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
-                // Decompress with fflate
-                decompressed = fflate.strFromU8(fflate.unzlibSync(compressed));
+
+                // Step 3: Decompress with fflate
+                const decompressedBytes = fflate.unzlibSync(compressed);
+
+                // Step 4: Decode CBOR to JSON object
+                const cborDecoded = CBOR.decode(decompressedBytes.buffer);
+
+                // Step 5: Convert to JSON string and detokenize
+                const tokenizedJSON = JSON.stringify(cborDecoded);
+                const detokenized = detokenizeFHIR(tokenizedJSON);
+
+                // Step 6: Parse final JSON
+                jsonData = JSON.parse(detokenized);
             } catch (e) {
-                // fflate failed, try UTF-16 format
+                // CBOR format failed, try older formats
+                console.log('CBOR decode failed, trying fallback formats');
+            }
+
+            // Fallback to plain fflate format (without CBOR/tokenization)
+            if (!jsonData) {
+                try {
+                    const base64 = hash.replace(/-/g, '+').replace(/_/g, '/');
+                    const padded = base64 + '==='.slice((base64.length + 3) % 4);
+                    const compressed = Uint8Array.from(atob(padded), c => c.charCodeAt(0));
+                    decompressed = fflate.strFromU8(fflate.unzlibSync(compressed));
+                    jsonData = JSON.parse(decompressed);
+                } catch (e) {
+                    // Plain fflate failed too
+                }
             }
 
             // Fallback to UTF-16 format (middle format)
-            if (!decompressed) {
+            if (!jsonData) {
                 try {
                     decompressed = LZString.decompressFromUTF16(decodeURIComponent(hash));
+                    jsonData = JSON.parse(decompressed);
                 } catch (e) {
                     // UTF-16 failed too
                 }
             }
 
             // Fallback to old EncodedURIComponent format (oldest format)
-            if (!decompressed) {
-                decompressed = LZString.decompressFromEncodedURIComponent(hash);
+            if (!jsonData) {
+                try {
+                    decompressed = LZString.decompressFromEncodedURIComponent(hash);
+                    jsonData = JSON.parse(decompressed);
+                } catch (e) {
+                    // All formats failed
+                }
             }
 
-            if (decompressed) {
-                const jsonData = JSON.parse(decompressed);
+            if (jsonData) {
                 currentJSON = jsonData;
                 elements.jsonInput.value = JSON.stringify(jsonData, null, 2);
                 visualizeJSON(jsonData);
                 showSuccess('JSON loaded from URL successfully!');
+            } else {
+                throw new Error('Unable to decode URL - format not recognized');
             }
         } catch (error) {
             showError('Failed to load JSON from URL: ' + error.message);
@@ -135,10 +231,17 @@ function handleShare() {
 
         const jsonString = JSON.stringify(currentJSON);
 
-        // Compress with fflate (gzip/zlib)
-        const compressed = fflate.zlibSync(fflate.strToU8(jsonString), { level: 9 });
+        // Step 1: Tokenize FHIR fields (replace common strings with short tokens)
+        const tokenized = tokenizeFHIR(jsonString);
 
-        // Convert to base64url (URL-safe)
+        // Step 2: Parse tokenized JSON and encode to CBOR binary format
+        const tokenizedJSON = JSON.parse(tokenized);
+        const cborData = CBOR.encode(tokenizedJSON);
+
+        // Step 3: Compress with fflate (gzip/zlib)
+        const compressed = fflate.zlibSync(new Uint8Array(cborData), { level: 9 });
+
+        // Step 4: Convert to base64url (URL-safe)
         const base64 = btoa(String.fromCharCode.apply(null, compressed));
         const urlSafe = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 
